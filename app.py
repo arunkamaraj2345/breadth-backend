@@ -1,169 +1,159 @@
-# =========================
-# MINIMAL BREADTH BACKEND
-# SUFFIX-ONLY FIX
-# =========================
-
 from flask import Flask, jsonify, request
-import yfinance as yf
 import pandas as pd
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 import os
 
 app = Flask(__name__)
 
+# --------------------------------------------------
+# PATHS
+# --------------------------------------------------
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UNIVERSE_DIR = os.path.join(BASE_DIR, "universes")
+HARD_DATA_DIR = os.path.join(BASE_DIR, "hard_data")
+HISTORICAL_DIR = os.path.join(BASE_DIR, "historical_data")
 HOLIDAY_FILE = os.path.join(BASE_DIR, "holidays.csv")
 
-# -------------------------
-# SYMBOL NORMALIZATION
-# -------------------------
+API_BASE = "https://yfinance-data-api.onrender.com/get_stock_data_between_dates"
+
+os.makedirs(HARD_DATA_DIR, exist_ok=True)
+os.makedirs(HISTORICAL_DIR, exist_ok=True)
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 
 def normalize_symbol(symbol):
-    if not isinstance(symbol, str):
-        return None
-
-    symbol = symbol.strip().upper()
-
-    if not symbol:
-        return None
-
+    symbol = str(symbol).strip().upper()
     if symbol.endswith(".NS") or symbol.endswith(".BO"):
         return symbol
-
     return symbol + ".NS"
-
-# -------------------------
-# LOAD HOLIDAYS
-# -------------------------
 
 def load_holidays():
     if not os.path.exists(HOLIDAY_FILE):
         return set()
-
     df = pd.read_csv(HOLIDAY_FILE, header=None)
-    return {
-        datetime.strptime(str(d).strip(), "%Y-%m-%d").date()
-        for d in df.iloc[:, 0]
-    }
+    dates = pd.to_datetime(df.iloc[:, 0], errors="coerce")
+    return set(dates.dropna().dt.date)
 
 HOLIDAYS = load_holidays()
 
-# -------------------------
-# LOAD UNIVERSES
-# -------------------------
-
-def load_universes():
-    universes = {}
-
-    for file in os.listdir(UNIVERSE_DIR):
-        if file.endswith(".csv"):
-            name = file.replace(".csv", "").upper()
-            df = pd.read_csv(os.path.join(UNIVERSE_DIR, file), header=None)
-
-            symbols = (
-                df.iloc[:, 0]
-                .apply(normalize_symbol)
-                .dropna()
-                .tolist()
-            )
-
-            universes[name] = symbols
-
-    return universes
-
-UNIVERSES = load_universes()
-
-# -------------------------
-# HELPERS
-# -------------------------
-
-def exclude_holidays(df):
-    return df[~df.index.date.astype(object).isin(HOLIDAYS)]
-
-def compute_sum(series, window):
-    if len(series) < window:
+def fetch_stock_data(symbol, start, end):
+    params = {
+        "symbol": symbol,
+        "start": start,
+        "end": end,
+        "fields": "Close,High,52weekhigh"
+    }
+    try:
+        r = requests.get(API_BASE, params=params)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not isinstance(data, list) or len(data) < 2:
+            return None
+        header = data[0]
+        rows = data[1:]
+        df = pd.DataFrame(rows, columns=header)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        return df.dropna(subset=["Date", "Close"])
+    except:
         return None
-    return float(series.iloc[-window:].sum())
 
-# -------------------------
-# DAILY (HEAVY)
-# -------------------------
+def sum_last(series, n):
+    if len(series) < n:
+        return "NIL"
+    return float(series.iloc[-n:].sum())
 
-HARD_DATA = {}
+# --------------------------------------------------
+# SERVER STATUS
+# --------------------------------------------------
+
+@app.route("/status", methods=["GET"])
+def status():
+    return jsonify({
+        "status": "server on",
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
+# --------------------------------------------------
+# HARD DATA
+# --------------------------------------------------
 
 @app.route("/run-daily", methods=["GET"])
 def run_daily():
+
     universe = request.args.get("universe", "").upper()
+    universe_file = os.path.join(UNIVERSE_DIR, f"{universe}.csv")
 
-    if universe not in UNIVERSES:
-        return {"error": "Invalid universe"}, 400
+    if not os.path.exists(universe_file):
+        return jsonify({"error": "Universe not found"}), 400
 
-    attempted = 0
-    empty_hist = 0
-    insufficient = 0
-    loaded = 0
+    symbols = pd.read_csv(universe_file, header=None)[0].dropna()
+    symbols = [normalize_symbol(s) for s in symbols]
 
-    HARD_DATA[universe] = {}
+    today = datetime.today().date()
+    start_date = today - timedelta(days=370)
+    end_date = today + timedelta(days=1)
 
-    for symbol in UNIVERSES[universe]:
-        attempted += 1
+    rows = []
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        try:
-            t = yf.Ticker(symbol)
-            hist = t.history(period="400d", interval="1d")
+    for symbol in symbols:
+        df = fetch_stock_data(symbol, start_date.isoformat(), end_date.isoformat())
+        if df is None or df.empty:
+            continue
 
-            if hist.empty:
-                empty_hist += 1
-                continue
+        df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
+        df = df.iloc[:-1]
 
-            hist = exclude_holidays(hist)
+        if len(df) < 20:
+            continue
 
-            if len(hist) < 20:
-                insufficient += 1
-                continue
+        closes = df["Close"].astype(float)
 
-            closes = hist.iloc[:-1]["Close"]
+        rows.append({
+            "symbol": symbol,
+            "sum_19": sum_last(closes, 19),
+            "sum_49": sum_last(closes, 49),
+            "sum_99": sum_last(closes, 99),
+            "sum_199": sum_last(closes, 199),
+            "52w_high": df["52weekhigh"].iloc[-1]
+        })
 
-            sum_19 = compute_sum(closes, 19)
-            sum_49 = compute_sum(closes, 49)
-            sum_99 = compute_sum(closes, 99)
-            sum_199 = compute_sum(closes, 199)
+    out_file = os.path.join(HARD_DATA_DIR, f"{universe}_breadth.csv")
+    with open(out_file, "w", newline="") as f:
+        f.write(f"# generated_at: {generated_at}\n")
+        pd.DataFrame(rows).to_csv(f, index=False)
 
-            info = t.info
-            fifty_two_high = info.get("fiftyTwoWeekHigh")
-
-            HARD_DATA[universe][symbol] = {
-                "sum_19": sum_19,
-                "sum_49": sum_49,
-                "sum_99": sum_99,
-                "sum_199": sum_199,
-                "52w_high": fifty_two_high
-            }
-
-            loaded += 1
-
-        except:
-            empty_hist += 1
-
-    return {
+    return jsonify({
         "universe": universe,
-        "attempted": attempted,
-        "empty_history": empty_hist,
-        "insufficient_history": insufficient,
-        "stocks_loaded": loaded
-    }
+        "stocks_built": len(rows),
+        "file_written": out_file,
+        "generated_at": generated_at
+    })
 
-# -------------------------
-# INTRADAY (LIGHT)
-# -------------------------
+# (UNCHANGED IMPORTS AND SETUP ABOVE)
+
+# --------------------------------------------------
+# SOFT DATA + HISTORICAL
+# --------------------------------------------------
 
 @app.route("/breadth", methods=["GET"])
 def breadth():
-    universe = request.args.get("universe", "").upper()
 
-    if universe not in HARD_DATA:
-        return {"error": "Run /run-daily first"}, 400
+    universe = request.args.get("universe", "").upper()
+    hard_file = os.path.join(HARD_DATA_DIR, f"{universe}_breadth.csv")
+
+    if not os.path.exists(hard_file):
+        return jsonify({"error": "Run /run-daily first"}), 400
+
+    with open(hard_file, "r") as f:
+        hard_timestamp = f.readline().replace("# generated_at:", "").strip()
+
+    hard_df = pd.read_csv(hard_file, comment="#")
 
     counts = {
         "20MA": {"above": 0, "available": 0},
@@ -175,57 +165,128 @@ def breadth():
     new_highs = 0
     high_available = 0
 
-    for symbol, hd in HARD_DATA[universe].items():
-        try:
-            hist = yf.Ticker(symbol).history(period="2d", interval="1d")
-            if hist.empty:
-                continue
+    today = datetime.today().date()
+    start_date = today - timedelta(days=8)
+    end_date = today + timedelta(days=1)
 
-            price = float(hist["Close"].iloc[-1])
-            high = float(hist["High"].iloc[-1])
+    last_trading_date = None
 
-            ma_map = {
-                "20MA":  (hd["sum_19"]  + price) / 20 if hd["sum_19"]  else None,
-                "50MA":  (hd["sum_49"]  + price) / 50 if hd["sum_49"]  else None,
-                "100MA": (hd["sum_99"]  + price) / 100 if hd["sum_99"] else None,
-                "200MA": (hd["sum_199"] + price) / 200 if hd["sum_199"] else None,
-            }
+    for _, row in hard_df.iterrows():
 
-            for ma, value in ma_map.items():
-                if value is None:
-                    continue
-                counts[ma]["available"] += 1
-                if price / value >= 1:
-                    counts[ma]["above"] += 1
+        df = fetch_stock_data(
+            row["symbol"],
+            start_date.isoformat(),
+            end_date.isoformat()
+        )
 
-            if high is not None and hd["52w_high"] is not None:
-                high_available += 1
-                if high >= hd["52w_high"]:
-                    new_highs += 1
-
-        except:
+        if df is None or df.empty:
             continue
 
-    result = {}
+        last = df.iloc[-1]
+        ltp = float(last["Close"])
+        high = float(last["High"])
+        last_trading_date = last["Date"].date()
+
+        ma_map = {
+            "20MA": (row["sum_19"], 20),
+            "50MA": (row["sum_49"], 50),
+            "100MA": (row["sum_99"], 100),
+            "200MA": (row["sum_199"], 200),
+        }
+
+        for ma, (sum_val, period) in ma_map.items():
+
+            if sum_val == "NIL":
+                continue
+
+            try:
+                sum_val = float(sum_val)
+            except:
+                continue
+
+            ma_value = (sum_val + ltp) / period
+
+            counts[ma]["available"] += 1
+            if ltp / ma_value >= 1:
+                counts[ma]["above"] += 1
+
+        if not pd.isna(row["52w_high"]):
+            high_available += 1
+            if high >= float(row["52w_high"]):
+                new_highs += 1
+
+    # ----------------------------------------------
+    # BUILD OUTPUT (ENHANCED)
+    # ----------------------------------------------
+
+    breadth_output = {}
+    nil_found = False
 
     for ma, d in counts.items():
-        if d["available"] > 0:
-            result[ma] = {
-                "count": d["above"],
+        if d["available"] == 0:
+            breadth_output[ma] = {
+                "above": "NIL",
+                "available": 0,
+                "pct": "NIL"
+            }
+            nil_found = True
+        else:
+            breadth_output[ma] = {
+                "above": d["above"],
+                "available": d["available"],
                 "pct": d["above"] / d["available"]
             }
 
-    return jsonify({
-        "breadth": result,
-        "new_52w_highs": {
-            "count": new_highs,
-            "pct": new_highs / high_available if high_available else 0
+    if high_available == 0:
+        highs_output = {
+            "above": "NIL",
+            "available": 0,
+            "pct": "NIL"
         }
+        nil_found = True
+    else:
+        highs_output = {
+            "above": new_highs,
+            "available": high_available,
+            "pct": new_highs / high_available
+        }
+
+    # ----------------------------------------------
+    # SAVE TO HISTORICAL (ONLY IF NO NIL)
+    # ----------------------------------------------
+
+    hist_file = os.path.join(HISTORICAL_DIR, f"{universe}_breadth.csv")
+
+    if not nil_found and last_trading_date is not None:
+        row = {
+            "date": last_trading_date,
+            "20MA": breadth_output["20MA"]["pct"],
+            "50MA": breadth_output["50MA"]["pct"],
+            "100MA": breadth_output["100MA"]["pct"],
+            "200MA": breadth_output["200MA"]["pct"],
+            "52W": highs_output["pct"]
+        }
+
+        if os.path.exists(hist_file):
+            hist_df = pd.read_csv(hist_file)
+            hist_df = hist_df[hist_df["date"] != str(last_trading_date)]
+            hist_df = pd.concat([hist_df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            hist_df = pd.DataFrame([row])
+
+        hist_df.to_csv(hist_file, index=False)
+
+    return jsonify({
+        "hard_data_as_of": hard_timestamp,
+        "ltp_as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "breadth": breadth_output,
+        "new_52w_highs": highs_output
     })
 
-# -------------------------
-# START SERVER
-# -------------------------
+
+# --------------------------------------------------
+# RUN SERVER
+# --------------------------------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
