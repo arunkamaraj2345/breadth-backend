@@ -44,26 +44,34 @@ def fetch_history(symbol, start, end):
         print(f"[FETCH] {symbol}")
 
         ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start, end=end, auto_adjust=False).reset_index()
+        df = ticker.history(
+            start=start,
+            end=end,
+            auto_adjust=False
+        ).reset_index()
 
         # micro sleep (human-like)
         time.sleep(0.2 + random.random() * 0.3)
 
         if df.empty:
-            return None
+            return None, None
 
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date", "Close"])
 
-        # apply holiday exclusion
+        # ------------------------------------------
+        # HOLIDAY EXCLUSION (FIRST)
+        # ------------------------------------------
         df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
 
-        return df
+        info = ticker.info
+
+        return df, info
 
     except Exception as e:
         print(f"[ERROR] fetch_history failed for {symbol}: {e}")
         traceback.print_exc()
-        return None
+        return None, None
 
 # --------------------------------------------------
 # STATUS
@@ -77,11 +85,11 @@ def status():
     })
 
 # --------------------------------------------------
-# SINGLE STOCK ENGINE
+# HARD DATA ENDPOINT
 # --------------------------------------------------
 
-@app.route("/stock-engine", methods=["GET"])
-def stock_engine():
+@app.route("/hard-data", methods=["GET"])
+def hard_data():
     try:
         symbol = request.args.get("symbol")
         if not symbol:
@@ -93,36 +101,68 @@ def stock_engine():
         start_date = today - timedelta(days=370)
         end_date = today + timedelta(days=1)
 
-        df = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+        df, info = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
-        # drop possibly incomplete candle
+        # ------------------------------------------
+        # IGNORE LAST TRADING DAY (AFTER HOLIDAYS)
+        # ------------------------------------------
         df = df.iloc[:-1]
 
         closes = df["Close"].astype(float)
 
-        hard_data = {
+        output = {
             "symbol": symbol,
             "sum_19": sum_last(closes, 19),
             "sum_49": sum_last(closes, 49),
             "sum_99": sum_last(closes, 99),
             "sum_199": sum_last(closes, 199),
+            "52w_high": info.get("fiftyTwoWeekHigh", "NIL"),
+            "data_upto": str(df["Date"].iloc[-1].date())
         }
 
-        # 52W high
-        try:
-            hard_data["52w_high"] = float(df["High"].rolling(252).max().iloc[-1])
-        except:
-            hard_data["52w_high"] = "NIL"
+        return jsonify({
+            "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "hard_data": output
+        })
+
+    except Exception as e:
+        print("[FATAL] /hard-data crashed:", e)
+        traceback.print_exc()
+        return jsonify({
+            "error": "hard-data failed",
+            "details": str(e)
+        }), 500
+
+# --------------------------------------------------
+# SOFT DATA ENDPOINT
+# --------------------------------------------------
+
+@app.route("/soft-data", methods=["GET"])
+def soft_data():
+    try:
+        symbol = request.args.get("symbol")
+        if not symbol:
+            return jsonify({"error": "symbol parameter missing"}), 400
+
+        symbol = normalize_symbol(symbol)
+
+        today = datetime.today().date()
+        start_date = today - timedelta(days=10)
+        end_date = today + timedelta(days=1)
+
+        df, _ = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+        if df is None or df.empty:
+            return jsonify({"error": "No data found"}), 404
 
         # ------------------------------------------
-        # SOFT DATA (LATEST)
+        # LAST TRADING DAY (AFTER HOLIDAYS)
         # ------------------------------------------
-
         last = df.iloc[-1]
 
-        soft_data = {
+        output = {
+            "symbol": symbol,
             "last_trading_date": str(last["Date"].date()),
             "close": float(last["Close"]),
             "high": float(last["High"])
@@ -130,15 +170,14 @@ def stock_engine():
 
         return jsonify({
             "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "hard_data": hard_data,
-            "soft_data": soft_data
+            "soft_data": output
         })
 
     except Exception as e:
-        print("[FATAL] /stock-engine crashed:", e)
+        print("[FATAL] /soft-data crashed:", e)
         traceback.print_exc()
         return jsonify({
-            "error": "stock-engine failed",
+            "error": "soft-data failed",
             "details": str(e)
         }), 500
 
