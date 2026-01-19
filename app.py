@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import time
 import random
 import os
+import traceback
 
 app = Flask(__name__)
 
@@ -25,13 +26,16 @@ def sum_last(series, n):
 
 def fetch_stock_data(symbol, start, end):
     try:
+        print(f"[FETCH] {symbol} {start} → {end}")
+
         ticker = yf.Ticker(symbol)
         df = ticker.history(start=start, end=end, auto_adjust=False).reset_index()
 
-        # micro sleep (human-like pacing)
+        # micro sleep to look human
         time.sleep(0.2 + random.random() * 0.3)
 
         if df.empty:
+            print(f"[WARN] No data for {symbol}")
             return None
 
         if "Date" in df.columns:
@@ -44,7 +48,9 @@ def fetch_stock_data(symbol, start, end):
 
         return df.dropna(subset=["Date", "Close"])
 
-    except:
+    except Exception as e:
+        print(f"[ERROR] fetch_stock_data failed for {symbol}: {e}")
+        traceback.print_exc()
         return None
 
 # --------------------------------------------------
@@ -59,167 +65,194 @@ def status():
     })
 
 # --------------------------------------------------
-# RUN DAILY (IN-MEMORY HARD DATA)
+# RUN DAILY (HARD DATA - IN MEMORY)
 # --------------------------------------------------
 
 @app.route("/run-daily", methods=["GET"])
 def run_daily():
+    try:
+        universe = request.args.get("universe", "").upper()
+        universe_file = os.path.join("universes", f"{universe}.csv")
 
-    universe = request.args.get("universe", "").upper()
-    universe_file = os.path.join("universes", f"{universe}.csv")
+        if not universe:
+            return jsonify({"error": "universe parameter missing"}), 400
 
-    if not os.path.exists(universe_file):
-        return jsonify({"error": "Universe not found"}), 400
+        if not os.path.exists(universe_file):
+            return jsonify({"error": "Universe not found"}), 400
 
-    symbols = pd.read_csv(universe_file, header=None)[0].dropna()
-    symbols = [normalize_symbol(s) for s in symbols]
+        symbols = pd.read_csv(universe_file, header=None)[0].dropna()
+        symbols = [normalize_symbol(s) for s in symbols]
 
-    today = datetime.today().date()
-    start_date = today - timedelta(days=370)
-    end_date = today + timedelta(days=1)
+        print(f"[RUN-DAILY] Universe={universe}, Symbols={len(symbols)}")
 
-    rows = []
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        today = datetime.today().date()
+        start_date = today - timedelta(days=370)
+        end_date = today + timedelta(days=1)
 
-    for symbol in symbols:
+        rows = []
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        df = fetch_stock_data(symbol, start_date.isoformat(), end_date.isoformat())
-        if df is None or df.empty:
-            continue
+        for i, symbol in enumerate(symbols, start=1):
+            print(f"[RUN-DAILY] {i}/{len(symbols)} → {symbol}")
 
-        df = df.iloc[:-1]  # drop possibly incomplete candle
+            df = fetch_stock_data(symbol, start_date.isoformat(), end_date.isoformat())
+            if df is None or df.empty:
+                continue
 
-        if len(df) < 20:
-            continue
+            df = df.iloc[:-1]  # drop possibly incomplete candle
 
-        closes = df["Close"].astype(float)
+            if len(df) < 20:
+                continue
 
-        rows.append({
-            "symbol": symbol,
-            "sum_19": sum_last(closes, 19),
-            "sum_49": sum_last(closes, 49),
-            "sum_99": sum_last(closes, 99),
-            "sum_199": sum_last(closes, 199),
-            "52w_high": df["52weekhigh"].iloc[-1]
+            closes = df["Close"].astype(float)
+
+            rows.append({
+                "symbol": symbol,
+                "sum_19": sum_last(closes, 19),
+                "sum_49": sum_last(closes, 49),
+                "sum_99": sum_last(closes, 99),
+                "sum_199": sum_last(closes, 199),
+                "52w_high": df["52weekhigh"].iloc[-1]
+            })
+
+        print(f"[RUN-DAILY] Completed. Stocks built={len(rows)}")
+
+        return jsonify({
+            "universe": universe,
+            "generated_at": generated_at,
+            "stocks_built": len(rows),
+            "hard_data": rows
         })
 
-    return jsonify({
-        "universe": universe,
-        "generated_at": generated_at,
-        "stocks_built": len(rows),
-        "hard_data": rows
-    })
+    except Exception as e:
+        print("[FATAL] /run-daily crashed:", e)
+        traceback.print_exc()
+        return jsonify({
+            "error": "run-daily failed",
+            "details": str(e)
+        }), 500
 
 # --------------------------------------------------
-# BREADTH (SOFT DATA, NO STORAGE)
+# BREADTH (SOFT DATA - JSON INPUT)
 # --------------------------------------------------
 
 @app.route("/breadth", methods=["POST"])
 def breadth():
+    try:
+        payload = request.get_json()
+        if not payload:
+            return jsonify({"error": "JSON body missing"}), 400
 
-    payload = request.get_json()
-    hard_data = payload.get("hard_data")
+        hard_data = payload.get("hard_data")
+        if not hard_data:
+            return jsonify({"error": "hard_data missing"}), 400
 
-    if not hard_data:
-        return jsonify({"error": "Missing hard_data"}), 400
-
-    counts = {
-        "20MA": {"above": 0, "available": 0},
-        "50MA": {"above": 0, "available": 0},
-        "100MA": {"above": 0, "available": 0},
-        "200MA": {"above": 0, "available": 0},
-    }
-
-    new_highs = 0
-    high_available = 0
-    last_trading_date = None
-
-    today = datetime.today().date()
-    start_date = today - timedelta(days=8)
-    end_date = today + timedelta(days=1)
-
-    for row in hard_data:
-
-        df = fetch_stock_data(
-            row["symbol"],
-            start_date.isoformat(),
-            end_date.isoformat()
-        )
-
-        if df is None or df.empty:
-            continue
-
-        last = df.iloc[-1]
-        ltp = float(last["Close"])
-        high = float(last["High"])
-        last_trading_date = last["Date"].date()
-
-        ma_map = {
-            "20MA": (row["sum_19"], 20),
-            "50MA": (row["sum_49"], 50),
-            "100MA": (row["sum_99"], 100),
-            "200MA": (row["sum_199"], 200),
+        counts = {
+            "20MA": {"above": 0, "available": 0},
+            "50MA": {"above": 0, "available": 0},
+            "100MA": {"above": 0, "available": 0},
+            "200MA": {"above": 0, "available": 0},
         }
 
-        for ma, (sum_val, period) in ma_map.items():
+        new_highs = 0
+        high_available = 0
+        last_trading_date = None
 
-            if sum_val == "NIL":
+        today = datetime.today().date()
+        start_date = today - timedelta(days=8)
+        end_date = today + timedelta(days=1)
+
+        for i, row in enumerate(hard_data, start=1):
+            symbol = row.get("symbol")
+            print(f"[BREADTH] {i}/{len(hard_data)} → {symbol}")
+
+            df = fetch_stock_data(
+                symbol,
+                start_date.isoformat(),
+                end_date.isoformat()
+            )
+
+            if df is None or df.empty:
                 continue
 
-            try:
-                sum_val = float(sum_val)
-            except:
-                continue
+            last = df.iloc[-1]
+            ltp = float(last["Close"])
+            high = float(last["High"])
+            last_trading_date = last["Date"].date()
 
-            ma_value = (sum_val + ltp) / period
+            ma_map = {
+                "20MA": (row["sum_19"], 20),
+                "50MA": (row["sum_49"], 50),
+                "100MA": (row["sum_99"], 100),
+                "200MA": (row["sum_199"], 200),
+            }
 
-            counts[ma]["available"] += 1
-            if ltp / ma_value >= 1:
-                counts[ma]["above"] += 1
+            for ma, (sum_val, period) in ma_map.items():
+                if sum_val == "NIL":
+                    continue
 
-        if row.get("52w_high") is not None:
-            high_available += 1
-            if high >= float(row["52w_high"]):
-                new_highs += 1
+                try:
+                    sum_val = float(sum_val)
+                except:
+                    continue
 
-    breadth_output = {}
-    nil_found = False
+                ma_value = (sum_val + ltp) / period
+                counts[ma]["available"] += 1
 
-    for ma, d in counts.items():
-        if d["available"] == 0:
-            breadth_output[ma] = {
+                if ltp / ma_value >= 1:
+                    counts[ma]["above"] += 1
+
+            if row.get("52w_high") is not None:
+                high_available += 1
+                if high >= float(row["52w_high"]):
+                    new_highs += 1
+
+        breadth_output = {}
+        nil_found = False
+
+        for ma, d in counts.items():
+            if d["available"] == 0:
+                breadth_output[ma] = {
+                    "above": "NIL",
+                    "available": 0,
+                    "pct": "NIL"
+                }
+                nil_found = True
+            else:
+                breadth_output[ma] = {
+                    "above": d["above"],
+                    "available": d["available"],
+                    "pct": d["above"] / d["available"]
+                }
+
+        if high_available == 0:
+            highs_output = {
                 "above": "NIL",
                 "available": 0,
                 "pct": "NIL"
             }
             nil_found = True
         else:
-            breadth_output[ma] = {
-                "above": d["above"],
-                "available": d["available"],
-                "pct": d["above"] / d["available"]
+            highs_output = {
+                "above": new_highs,
+                "available": high_available,
+                "pct": new_highs / high_available
             }
 
-    if high_available == 0:
-        highs_output = {
-            "above": "NIL",
-            "available": 0,
-            "pct": "NIL"
-        }
-        nil_found = True
-    else:
-        highs_output = {
-            "above": new_highs,
-            "available": high_available,
-            "pct": new_highs / high_available
-        }
+        return jsonify({
+            "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_trading_date": str(last_trading_date),
+            "breadth": breadth_output,
+            "new_52w_highs": highs_output
+        })
 
-    return jsonify({
-        "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "last_trading_date": str(last_trading_date),
-        "breadth": breadth_output,
-        "new_52w_highs": highs_output
-    })
+    except Exception as e:
+        print("[FATAL] /breadth crashed:", e)
+        traceback.print_exc()
+        return jsonify({
+            "error": "breadth failed",
+            "details": str(e)
+        }), 500
 
 # --------------------------------------------------
 # RUN SERVER
