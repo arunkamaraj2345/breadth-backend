@@ -9,6 +9,10 @@ import os
 
 app = Flask(__name__)
 
+from flask_cors import CORS
+CORS(app)
+
+
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
@@ -187,3 +191,4 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
