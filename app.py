@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request 
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -9,8 +9,43 @@ import os
 from flask_cors import CORS
 
 app = Flask(__name__)
-
 CORS(app)
+
+# --------------------------------------------------
+# STATUS + FULL WARMUP (PLACED AT TOP)
+# --------------------------------------------------
+
+@app.route("/status", methods=["GET"])
+def status():
+    try:
+        print("=== FULL WARMUP START ===")
+
+        # 1) Warm Yahoo session + cookies + DNS + TLS
+        ticker = yf.Ticker("RELIANCE.NS")
+        ticker.history(period="5d")
+
+        # 2) Warm pandas + numpy engine
+        pd.to_datetime(["2024-01-01","2024-01-02"])
+        pd.DataFrame({"a":[1,2,3]}).astype(float)
+
+        # 3) Allow connection pool to stabilise
+        time.sleep(2)
+
+        print("=== FULL WARMUP COMPLETE ===")
+
+        return jsonify({
+            "status": "server on",
+            "warmup status": "server warm",
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": "server on",
+            "warmup status": "warmup failed",
+            "error": str(e)
+        }), 500
+
 
 # --------------------------------------------------
 # CONFIG
@@ -62,9 +97,7 @@ def fetch_history(symbol, start, end):
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date", "Close"])
 
-        # ------------------------------------------
-        # HOLIDAY EXCLUSION (FIRST)
-        # ------------------------------------------
+        # HOLIDAY EXCLUSION
         df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
 
         info = ticker.info
@@ -75,17 +108,6 @@ def fetch_history(symbol, start, end):
         print(f"[ERROR] fetch_history failed for {symbol}: {e}")
         traceback.print_exc()
         return None, None
-
-# --------------------------------------------------
-# STATUS
-# --------------------------------------------------
-
-@app.route("/status", methods=["GET"])
-def status():
-    return jsonify({
-        "status": "server on",
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
 
 # --------------------------------------------------
 # HARD DATA ENDPOINT
@@ -108,11 +130,7 @@ def hard_data():
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
-        # ------------------------------------------
-        # IGNORE LAST TRADING DAY (AFTER HOLIDAYS)
-        # ------------------------------------------
         df = df.iloc[:-1]
-
         closes = df["Close"].astype(float)
 
         output = {
@@ -159,9 +177,6 @@ def soft_data():
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
-        # ------------------------------------------
-        # LAST TRADING DAY (AFTER HOLIDAYS)
-        # ------------------------------------------
         last = df.iloc[-1]
 
         output = {
@@ -190,5 +205,3 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
-
