@@ -20,15 +20,20 @@ def status():
     try:
         print("=== FULL WARMUP START ===")
 
-        # 1) Warm Yahoo session + cookies + DNS + TLS
         ticker = yf.Ticker("RELIANCE.NS")
+
+        # Warm price endpoint
         ticker.history(period="5d")
 
-        # 2) Warm pandas + numpy engine
+        # Warm Yahoo metadata endpoints
+        _ = ticker.fast_info
+        _ = ticker.info
+
+        # Warm pandas + numpy engine
         pd.to_datetime(["2024-01-01","2024-01-02"])
         pd.DataFrame({"a":[1,2,3]}).astype(float)
 
-        # 3) Allow connection pool to stabilise
+        # Allow connection pool to stabilise
         time.sleep(2)
 
         print("=== FULL WARMUP COMPLETE ===")
@@ -205,3 +210,4 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
