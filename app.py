@@ -22,22 +22,17 @@ def status():
 
         ticker = yf.Ticker("RELIANCE.NS")
 
-        # micro sleep (human-like)
-        time.sleep(1)
-
         # Warm price endpoint
         ticker.history(period="5d")
 
         # micro sleep (human-like)
-        time.sleep(1)
+        time.sleep(2)
 
         # Warm Yahoo metadata endpoints
         _ = ticker.fast_info
 
         # micro sleep (human-like)
         time.sleep(1)
-        
-        _ = ticker.info
 
         # Warm pandas + numpy engine
         pd.to_datetime(["2024-01-01","2024-01-02"])
@@ -115,9 +110,9 @@ def fetch_history(symbol, start, end):
         # HOLIDAY EXCLUSION
         df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
 
-        info = ticker.info
+        fast_info = ticker.fast_info
 
-        return df, info
+        return df, fast_info
 
     except Exception as e:
         print(f"[ERROR] fetch_history failed for {symbol}: {e}")
@@ -154,7 +149,7 @@ def hard_data():
             "sum_49": sum_last(closes, 49),
             "sum_99": sum_last(closes, 99),
             "sum_199": sum_last(closes, 199),
-            "52w_high": info.get("fiftyTwoWeekHigh", "NIL"),
+            "52w_high": fast_info.get("yearHigh", "NIL"),
             "data_upto": str(df["Date"].iloc[-1].date())
         }
 
@@ -220,6 +215,7 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
 
 
