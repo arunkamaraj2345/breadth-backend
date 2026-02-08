@@ -136,7 +136,7 @@ def hard_data():
         start_date = today - timedelta(days=370)
         end_date = today + timedelta(days=1)
 
-        df, info = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+        df, fast_info = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
@@ -215,6 +215,7 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
 
 
