@@ -22,17 +22,20 @@ def status():
 
         ticker = yf.Ticker("RELIANCE.NS")
 
+        # micro sleep (human-like)
+        time.sleep(1)
+
         # Warm price endpoint
         ticker.history(period="5d")
 
         # micro sleep (human-like)
-        time.sleep(0.2 + random.random() * 0.3)
+        time.sleep(1)
 
         # Warm Yahoo metadata endpoints
         _ = ticker.fast_info
 
         # micro sleep (human-like)
-        time.sleep(0.2 + random.random() * 0.3)
+        time.sleep(1)
         
         _ = ticker.info
 
@@ -217,5 +220,6 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
 
