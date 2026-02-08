@@ -25,8 +25,15 @@ def status():
         # Warm price endpoint
         ticker.history(period="5d")
 
+        # micro sleep (human-like)
+        time.sleep(0.2 + random.random() * 0.3)
+
         # Warm Yahoo metadata endpoints
         _ = ticker.fast_info
+
+        # micro sleep (human-like)
+        time.sleep(0.2 + random.random() * 0.3)
+        
         _ = ticker.info
 
         # Warm pandas + numpy engine
@@ -210,4 +217,5 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
