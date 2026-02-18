@@ -22,23 +22,17 @@ def status():
 
         ticker = yf.Ticker("RELIANCE.NS")
 
-        # Warm price endpoint
         ticker.history(period="5d")
-
-        # micro sleep (human-like)
         time.sleep(2)
 
-        # Warm Yahoo metadata endpoints
+        # keep warm but NOT required elsewhere
         _ = ticker.fast_info
 
-        # micro sleep (human-like)
         time.sleep(1)
 
-        # Warm pandas + numpy engine
         pd.to_datetime(["2024-01-01","2024-01-02"])
         pd.DataFrame({"a":[1,2,3]}).astype(float)
 
-        # Allow connection pool to stabilise
         time.sleep(2)
 
         print("=== FULL WARMUP COMPLETE ===")
@@ -63,6 +57,7 @@ def status():
 
 HOLIDAY_FILE = "holidays.csv"
 
+
 # --------------------------------------------------
 # HELPERS
 # --------------------------------------------------
@@ -73,6 +68,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol + ".NS"
 
+
 def load_holidays():
     if not os.path.exists(HOLIDAY_FILE):
         return set()
@@ -80,14 +76,17 @@ def load_holidays():
     dates = pd.to_datetime(df.iloc[:, 0], errors="coerce")
     return set(dates.dropna().dt.date)
 
+
 HOLIDAYS = load_holidays()
+
 
 def sum_last(series, n):
     if len(series) < n:
         return "NIL"
     return float(series.iloc[-n:].sum())
 
-def fetch_history(symbol, start, end):
+
+def fetch_history(symbol, start, end, require_fast_info=False):
     try:
         print(f"[FETCH] {symbol}")
 
@@ -98,7 +97,6 @@ def fetch_history(symbol, start, end):
             auto_adjust=False
         ).reset_index()
 
-        # micro sleep (human-like)
         time.sleep(0.2 + random.random() * 0.3)
 
         if df.empty:
@@ -110,7 +108,9 @@ def fetch_history(symbol, start, end):
         # HOLIDAY EXCLUSION
         df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
 
-        fast_info = ticker.fast_info
+        fast_info = None
+        if require_fast_info:
+            fast_info = ticker.fast_info
 
         return df, fast_info
 
@@ -118,6 +118,7 @@ def fetch_history(symbol, start, end):
         print(f"[ERROR] fetch_history failed for {symbol}: {e}")
         traceback.print_exc()
         return None, None
+
 
 # --------------------------------------------------
 # HARD DATA ENDPOINT
@@ -136,12 +137,29 @@ def hard_data():
         start_date = today - timedelta(days=370)
         end_date = today + timedelta(days=1)
 
-        df, fast_info = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+        df, _ = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
+        # EXCLUDE LTP
         df = df.iloc[:-1]
+
         closes = df["Close"].astype(float)
+
+        # --------------------------------------------
+        # 52W HIGH (Calendar Year Logic)
+        # --------------------------------------------
+
+        ltp_date = df["Date"].iloc[-1].date()
+        one_year_back = ltp_date.replace(year=ltp_date.year - 1)
+
+        eligible_df = df[df["Date"].dt.date >= one_year_back]
+
+        if eligible_df.empty:
+            high_52w = float(df["High"].max())
+        else:
+            high_52w = float(eligible_df["High"].max())
 
         output = {
             "symbol": symbol,
@@ -149,7 +167,7 @@ def hard_data():
             "sum_49": sum_last(closes, 49),
             "sum_99": sum_last(closes, 99),
             "sum_199": sum_last(closes, 199),
-            "52w_high": fast_info.get("yearHigh", "NIL"),
+            "52w_high": high_52w,
             "data_upto": str(df["Date"].iloc[-1].date())
         }
 
@@ -165,6 +183,7 @@ def hard_data():
             "error": "hard-data failed",
             "details": str(e)
         }), 500
+
 
 # --------------------------------------------------
 # SOFT DATA ENDPOINT
@@ -184,6 +203,7 @@ def soft_data():
         end_date = today + timedelta(days=1)
 
         df, _ = fetch_history(symbol, start_date.isoformat(), end_date.isoformat())
+
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
@@ -209,14 +229,10 @@ def soft_data():
             "details": str(e)
         }), 500
 
+
 # --------------------------------------------------
 # RUN SERVER
 # --------------------------------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
-
-
-
-
