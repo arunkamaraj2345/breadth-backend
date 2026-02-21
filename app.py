@@ -142,24 +142,50 @@ def hard_data():
         if df is None or df.empty:
             return jsonify({"error": "No data found"}), 404
 
-        # EXCLUDE LTP
-        df = df.iloc[:-1]
-
-        closes = df["Close"].astype(float)
+        # --------------------------------------------
+        # KEEP ORIGINAL BEHAVIOUR FOR SUMS
+        # (Exclude LTP exactly like before)
+        # --------------------------------------------
+        df_excl_ltp = df.iloc[:-1]
+        closes = df_excl_ltp["Close"].astype(float)
 
         # --------------------------------------------
-        # 52W HIGH (Calendar Year Logic)
+        # 52W HIGH (NEW LOGIC)
         # --------------------------------------------
 
+        def is_leap(year):
+            return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+
+        def get_lookback_days(ltp_date):
+            year = ltp_date.year
+            month = ltp_date.month
+
+            # March–Dec of leap year
+            if is_leap(year) and month >= 3:
+                return 366
+
+            # Jan–Feb of year after leap year
+            if is_leap(year - 1) and month <= 2:
+                return 366
+
+            return 365
+
+        # Use true LTP (last available row)
         ltp_date = df["Date"].iloc[-1].date()
-        one_year_back = ltp_date.replace(year=ltp_date.year - 1)
 
-        eligible_df = df[df["Date"].dt.date >= one_year_back]
+        lookback_days = get_lookback_days(ltp_date)
+        window_start = ltp_date - timedelta(days=lookback_days)
 
-        if eligible_df.empty:
-            high_52w = float(df["High"].max())
+        # Include LTP in boundary
+        window_df = df[df["Date"].dt.date >= window_start]
+
+        # Exclude LTP from high calculation
+        window_df = window_df[window_df["Date"].dt.date < ltp_date]
+
+        if window_df.empty:
+            high_52w = None
         else:
-            high_52w = float(eligible_df["High"].max())
+            high_52w = float(window_df["High"].max())
 
         output = {
             "symbol": symbol,
@@ -168,7 +194,7 @@ def hard_data():
             "sum_99": sum_last(closes, 99),
             "sum_199": sum_last(closes, 199),
             "52w_high": high_52w,
-            "data_upto": str(df["Date"].iloc[-1].date())
+            "data_upto": str(df_excl_ltp["Date"].iloc[-1].date())
         }
 
         return jsonify({
@@ -183,7 +209,6 @@ def hard_data():
             "error": "hard-data failed",
             "details": str(e)
         }), 500
-
 
 # --------------------------------------------------
 # SOFT DATA ENDPOINT
@@ -236,3 +261,4 @@ def soft_data():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
