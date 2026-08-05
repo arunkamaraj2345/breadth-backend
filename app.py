@@ -79,7 +79,7 @@ MERGE_COLUMN_MAP = {
 }
 
 # Regex to match merge filenames: YYYY-MM-DD.csv
-MERGE_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
+MERGE_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:\([^)]*\))?\.csv$")
 
 
 # --------------------------------------------------
@@ -459,6 +459,20 @@ def soft_data():
             "error":   "soft-data failed",
             "details": str(e)
         }), 500
+
+@app.route("/versions")
+def versions():
+    import sys
+    import flask
+    import pandas
+    import yfinance
+
+    return {
+        "python": sys.version,
+        "flask": flask.__version__,
+        "pandas": pandas.__version__,
+        "yfinance": yfinance.__version__
+    }
 
 
 # --------------------------------------------------
