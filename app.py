@@ -134,7 +134,7 @@ def fetch_history(symbol, start, end, require_fast_info=False):
         # is already tz-naive, this call has no effect.
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
 
-        df = df.dropna(subset=["Date", "Close"])
+        df = df.dropna(subset=["Date", "Open", "Close", "High", "Low", "Volume"])
 
         # HOLIDAY EXCLUSION — merge begins only after this
         df = df[~df["Date"].dt.date.isin(HOLIDAYS)]
